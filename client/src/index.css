@@ -1,0 +1,108 @@
+@import "tailwindcss";
+
+@theme {
+  --color-bg-page: #0b0b0b;
+  --color-bg-surface-1: #1a1a1a;
+  --color-bg-surface-2: #262626;
+  --color-accent: #378ADD;
+  --color-accent-muted-border: #B5D4F4;
+  --color-accent-muted-bg: #E6F1FB;
+  --color-text-primary: #ffffff;
+  --color-text-secondary: #888780;
+  --color-text-muted: #5F5E5A;
+  
+  --color-border-default: #2c2c2c;
+  --color-border-strong: #444441;
+  
+  --radius-control: 6px;
+  --radius-panel: 12px;
+
+  --font-sans: system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', monospace;
+}
+
+/* Global Reset and Styles */
+:root {
+  background-color: #0b0b0b;
+  color: #ffffff;
+  font-family: system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: #0b0b0b;
+  color: #ffffff;
+  min-height: 100vh;
+}
+
+/* Flat UI Surfaces - No gradients, no shadows, no glow effects */
+* {
+  box-shadow: none !important;
+  text-shadow: none !important;
+  filter: none !important;
+  backdrop-filter: none !important;
+}
+
+/* Font helpers for specific content types */
+.font-mono-ui {
+  font-family: ui-monospace, 'Cascadia Code', monospace;
+}
+
+/* Buttons matching requirements:
+   - standard: transparent bg, 1px #444 border, hover background #1a1a1a
+   - primary action: background #378ADD, white text, no border
+*/
+button, .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 16px;
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: 6px; /* controls */
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+  background-color: transparent;
+  border: 1px solid #444441; /* default strong border: 1px solid #444441 */
+  color: #ffffff;
+}
+
+button:hover, .btn:hover {
+  background-color: #1a1a1a;
+}
+
+button:disabled, .btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Primary Action Buttons (upload, send) */
+button.btn-primary, .btn-primary {
+  background-color: #378ADD;
+  color: #ffffff;
+  border: none;
+}
+
+button.btn-primary:hover, .btn-primary:hover {
+  background-color: #2b70b5; /* accent slightly darker hover */
+}
+
+/* Inputs styling */
+input, textarea, select {
+  background-color: #262626;
+  border: 1px solid #2c2c2c;
+  border-radius: 6px;
+  color: #ffffff;
+  padding: 8px 12px;
+  font-family: system-ui, -apple-system, sans-serif;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+input:focus, textarea:focus, select:focus {
+  border-color: #378ADD;
+}
