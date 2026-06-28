@@ -4,6 +4,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import authRouter from './routes/auth.js';
 import authMiddleware from './middleware/auth.js';
+import documentsRouter from './routes/documents.js';
 
 // Load environment variables
 dotenv.config();
@@ -18,6 +19,7 @@ app.use(express.json());
 
 // Routes
 app.use('/api/auth', authRouter);
+app.use('/api', documentsRouter);
 
 // Protected profile verification endpoint
 app.get('/api/auth/profile', authMiddleware, (req, res) => {
