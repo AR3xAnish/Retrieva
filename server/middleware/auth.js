@@ -8,7 +8,7 @@ const authMiddleware = (req, res, next) => {
   }
 
   const token = authHeader.split(' ')[1];
-  const secret = process.env.JWT_SECRET || 'super_secret_retrieva_key_change_me';
+  const secret = (process.env.JWT_SECRET || 'super_secret_retrieva_key_change_me').trim();
 
   try {
     const decoded = jwt.verify(token, secret);

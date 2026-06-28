@@ -1,12 +1,19 @@
 import React, { useState, useEffect } from 'react';
-import { BrowserRouter as Router, Routes, Route, NavLink } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, NavLink, Navigate } from 'react-router-dom';
 import axios from 'axios';
+import { AuthProvider, useAuth } from './hooks/useAuth';
+import PrivateRoute from './components/PrivateRoute';
+import Login from './pages/Login';
+import Register from './pages/Register';
+import Home from './pages/Home';
 
 // API configuration
 const API_URL = 'http://localhost:5000/api';
 
 // Navigation Sidebar Component
 function Sidebar({ serverStatus }) {
+  const { user, signOut } = useAuth();
+
   return (
     <div className="w-64 bg-bg-surface-2 border-r border-border-default flex flex-col h-screen p-6 justify-between">
       <div>
@@ -59,8 +66,16 @@ function Sidebar({ serverStatus }) {
         </nav>
       </div>
 
-      {/* Footer Info */}
-      <div className="pt-4 border-t border-border-default">
+      {/* Footer Info & User Session */}
+      <div className="pt-4 border-t border-border-default flex flex-col gap-4">
+        {user && (
+          <div className="flex flex-col gap-1 text-xs">
+            <span className="text-text-muted">Logged in as</span>
+            <span className="font-mono-ui text-text-primary font-medium truncate">{user.name}</span>
+            <span className="text-text-secondary truncate text-[11px]">{user.email}</span>
+          </div>
+        )}
+
         <div className="flex items-center justify-between text-xs">
           <span className="text-text-muted">Server Connection</span>
           <span
@@ -73,6 +88,13 @@ function Sidebar({ serverStatus }) {
             {serverStatus === 'ok' ? 'ACTIVE' : 'OFFLINE'}
           </span>
         </div>
+
+        <button
+          className="w-full text-xs font-semibold py-2 px-3 border border-border-strong text-text-secondary hover:text-white rounded-[6px] hover:bg-bg-surface-1 transition-colors text-center cursor-pointer"
+          onClick={signOut}
+        >
+          Sign Out
+        </button>
       </div>
     </div>
   );
@@ -387,7 +409,63 @@ function StatusView({ serverStatus, serverUrl }) {
   );
 }
 
-// Main App Router Shell
+// Routes sub-rendering shell inside AuthProvider context
+function AppRoutes({ serverStatus, files, addMockFile }) {
+  const { user } = useAuth();
+
+  return (
+    <Routes>
+      <Route path="/login" element={<Login />} />
+      <Route path="/register" element={<Register />} />
+      
+      {/* Public Home Page or Protected Dashboard based on session state */}
+      <Route
+        path="/"
+        element={
+          user ? (
+            <div className="flex h-screen w-screen overflow-hidden bg-bg-page">
+              <Sidebar serverStatus={serverStatus} />
+              <DashboardView
+                serverStatus={serverStatus}
+                files={files}
+                addMockFile={addMockFile}
+              />
+            </div>
+          ) : (
+            <Home />
+          )
+        }
+      />
+      <Route
+        path="/files"
+        element={
+          <PrivateRoute>
+            <div className="flex h-screen w-screen overflow-hidden bg-bg-page">
+              <Sidebar serverStatus={serverStatus} />
+              <FilesView files={files} />
+            </div>
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/status"
+        element={
+          <PrivateRoute>
+            <div className="flex h-screen w-screen overflow-hidden bg-bg-page">
+              <Sidebar serverStatus={serverStatus} />
+              <StatusView serverStatus={serverStatus} serverUrl={API_URL} />
+            </div>
+          </PrivateRoute>
+        }
+      />
+
+      {/* Redirection Catch-all */}
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
+  );
+}
+
+// Main App Entry
 export default function App() {
   const [serverStatus, setServerStatus] = useState('checking');
   const [files, setFiles] = useState([
@@ -447,28 +525,13 @@ export default function App() {
 
   return (
     <Router>
-      <div className="flex h-screen w-screen overflow-hidden bg-bg-page">
-        <Sidebar serverStatus={serverStatus} />
-        <Routes>
-          <Route
-            path="/"
-            element={
-              <DashboardView
-                serverStatus={serverStatus}
-                files={files}
-                addMockFile={addMockFile}
-              />
-            }
-          />
-          <Route path="/files" element={<FilesView files={files} />} />
-          <Route
-            path="/status"
-            element={
-              <StatusView serverStatus={serverStatus} serverUrl={API_URL} />
-            }
-          />
-        </Routes>
-      </div>
+      <AuthProvider>
+        <AppRoutes
+          serverStatus={serverStatus}
+          files={files}
+          addMockFile={addMockFile}
+        />
+      </AuthProvider>
     </Router>
   );
 }
