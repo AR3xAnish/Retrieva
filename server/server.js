@@ -5,6 +5,8 @@ import dotenv from 'dotenv';
 import authRouter from './routes/auth.js';
 import authMiddleware from './middleware/auth.js';
 import documentsRouter from './routes/documents.js';
+import chatRouter from './routes/chat.js';
+import { connectDb } from './lib/db.js';
 
 // Load environment variables
 dotenv.config();
@@ -20,6 +22,7 @@ app.use(express.json());
 // Routes
 app.use('/api/auth', authRouter);
 app.use('/api', documentsRouter);
+app.use('/api/chat', chatRouter);
 
 // Protected profile verification endpoint
 app.get('/api/auth/profile', authMiddleware, (req, res) => {
@@ -36,12 +39,9 @@ app.get('/api/health', (req, res) => {
 });
 
 // Database connection in background
-mongoose.connect(MONGODB_URI)
-  .then(() => {
-    console.log('Connected to MongoDB successfully.');
-  })
+connectDb(MONGODB_URI)
   .catch((error) => {
-    console.error('Database connection failed (will retry if server runs):', error.message);
+    // Error logged inside connectDb
   });
 
 // Start listening immediately
