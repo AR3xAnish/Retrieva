@@ -8,6 +8,9 @@ import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
 
 import Document from '../models/Document.js';
+import Chunk from '../models/Chunk.js';
+import { chunkText } from '../lib/chunker.js';
+import { embedText } from '../lib/openai.js';
 import authMiddleware from '../middleware/auth.js';
 
 const require = createRequire(import.meta.url);
@@ -22,16 +25,17 @@ const FALLBACK_DB_PATH = path.join(__dirname, '../fallback_db.json');
 // Helper to read fallback json database
 const readFallbackDb = () => {
   if (!fs.existsSync(FALLBACK_DB_PATH)) {
-    return { users: [], documents: [] };
+    return { users: [], documents: [], chunks: [] };
   }
   try {
     const data = fs.readFileSync(FALLBACK_DB_PATH, 'utf8');
     const parsed = JSON.parse(data);
     if (!parsed.documents) parsed.documents = [];
     if (!parsed.users) parsed.users = [];
+    if (!parsed.chunks) parsed.chunks = [];
     return parsed;
   } catch (e) {
-    return { users: [], documents: [] };
+    return { users: [], documents: [], chunks: [] };
   }
 };
 
@@ -66,7 +70,7 @@ const extractText = async (buffer, mimetype) => {
   throw new Error('Unsupported mimetype');
 };
 
-// POST /api/ingest - Upload document and parse text in the background
+// POST /api/ingest - Upload document, chunk, embed, and store in vector database in the background
 router.post('/ingest', authMiddleware, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
@@ -102,7 +106,7 @@ router.post('/ingest', authMiddleware, upload.single('file'), async (req, res) =
       
       const newDoc = {
         _id: documentId,
-        userId: req.userId,
+        userId: req.userId.toString(),
         filename: uniqueFilename,
         originalName,
         mimetype,
@@ -121,39 +125,68 @@ router.post('/ingest', authMiddleware, upload.single('file'), async (req, res) =
       documentId
     });
 
-    // Run extraction in background asynchronously
+    // Run extraction, chunking, and embedding in background asynchronously
     setTimeout(async () => {
       try {
-        console.log(`[BACKGROUND PARSER] Starting text extraction for doc: ${documentId} (${originalName})`);
+        console.log(`[BACKGROUND PIPELINE] Starting extraction/vectorization for doc: ${documentId} (${originalName})`);
         
-        const text = await extractText(req.file.buffer, mimetype);
-        const textLength = text.length;
-        const snippet = text.slice(0, 200);
+        // 1. Text Extraction
+        const rawText = await extractText(req.file.buffer, mimetype);
+        console.log(`[BACKGROUND PIPELINE] Successfully extracted ${rawText.length} characters.`);
 
-        console.log(`[BACKGROUND PARSER] Successfully extracted ${textLength} characters.`);
-        console.log(`[BACKGROUND PARSER] Snippet (first 200 chars):\n"${snippet}"`);
+        // 2. Chunking
+        const chunks = chunkText(rawText);
+        console.log(`[BACKGROUND PIPELINE] Divided text into ${chunks.length} chunks.`);
 
-        // Compute chunkCount (1 chunk per 1000 characters)
-        const chunkCount = Math.ceil(textLength / 1000) || 1;
+        // 3. Generate Vectors/Embeddings for each chunk
+        const chunkDocs = [];
+        for (let j = 0; j < chunks.length; j++) {
+          const chunkTextContent = chunks[j];
+          console.log(`[BACKGROUND PIPELINE] Embedding chunk ${j + 1}/${chunks.length} (length: ${chunkTextContent.length})...`);
+          
+          const embedding = await embedText(chunkTextContent);
 
+          chunkDocs.push({
+            userId: req.userId.toString(), // String ID as required by model spec
+            documentId,
+            filename: originalName,
+            text: chunkTextContent,
+            chunkIndex: j,
+            embedding
+          });
+        }
+
+        // 4. Vector Storage Insert
         if (isDbConnected) {
+          await Chunk.insertMany(chunkDocs);
           await Document.findByIdAndUpdate(documentId, {
             status: 'ready',
-            chunkCount
+            chunkCount: chunks.length
           });
-          console.log(`[BACKGROUND PARSER] Updated document ${documentId} status to "ready" with ${chunkCount} chunks.`);
+          console.log(`[BACKGROUND PIPELINE] Successfully completed vectorization for document ${documentId}.`);
         } else {
           const db = readFallbackDb();
+          
+          // Generate mock IDs for chunks
+          const fallbackChunks = chunkDocs.map(c => ({
+            _id: 'mock_chunk_' + Math.random().toString(36).substr(2, 9),
+            ...c,
+            createdAt: new Date().toISOString()
+          }));
+          
+          db.chunks.push(...fallbackChunks);
+          
           const idx = db.documents.findIndex(d => d._id === documentId);
           if (idx !== -1) {
             db.documents[idx].status = 'ready';
-            db.documents[idx].chunkCount = chunkCount;
-            writeFallbackDb(db);
-            console.log(`[BACKGROUND PARSER] Fallback DB: Updated status of ${documentId} to "ready".`);
+            db.documents[idx].chunkCount = chunks.length;
           }
+          
+          writeFallbackDb(db);
+          console.log(`[BACKGROUND PIPELINE] Fallback DB: Successfully vectorized and stored chunks for ${documentId}.`);
         }
       } catch (err) {
-        console.error(`[BACKGROUND PARSER] Failed to parse document ${documentId}:`, err.message);
+        console.error(`[BACKGROUND PIPELINE] Ingest processing failed for document ${documentId}:`, err.message);
         
         if (isDbConnected) {
           await Document.findByIdAndUpdate(documentId, { status: 'error' });
@@ -184,7 +217,7 @@ router.get('/docs', authMiddleware, async (req, res) => {
     } else {
       const db = readFallbackDb();
       const docs = db.documents
-        .filter(d => d.userId === req.userId)
+        .filter(d => d.userId === req.userId.toString())
         .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
       return res.status(200).json(docs);
     }
@@ -193,7 +226,7 @@ router.get('/docs', authMiddleware, async (req, res) => {
   }
 });
 
-// DELETE /api/docs/:id - Delete a user's document
+// DELETE /api/docs/:id - Delete document and all associated chunks
 router.delete('/docs/:id', authMiddleware, async (req, res) => {
   try {
     const docId = req.params.id;
@@ -209,8 +242,14 @@ router.delete('/docs/:id', authMiddleware, async (req, res) => {
         return res.status(403).json({ error: 'Access denied. You do not own this document.' });
       }
 
+      // Delete document record
       await Document.findByIdAndDelete(docId);
-      return res.status(200).json({ message: 'Document deleted successfully.' });
+
+      // Cascade delete all chunks
+      const deleteResult = await Chunk.deleteMany({ documentId: docId });
+      console.log(`[DELETE DOCUMENT] Successfully deleted document ${docId} and ${deleteResult.deletedCount} associated vector chunks.`);
+
+      return res.status(200).json({ message: 'Document and associated chunks deleted successfully.' });
     } else {
       const db = readFallbackDb();
       const idx = db.documents.findIndex(d => d._id === docId);
@@ -219,13 +258,22 @@ router.delete('/docs/:id', authMiddleware, async (req, res) => {
         return res.status(404).json({ error: 'Document not found.' });
       }
 
-      if (db.documents[idx].userId !== req.userId) {
+      if (db.documents[idx].userId !== req.userId.toString()) {
         return res.status(403).json({ error: 'Access denied. You do not own this document.' });
       }
 
+      // Remove document from array
       db.documents.splice(idx, 1);
+
+      // Cascade remove chunks from array
+      const initialChunkCount = db.chunks.length;
+      db.chunks = db.chunks.filter(c => c.documentId !== docId);
+      const deletedChunksCount = initialChunkCount - db.chunks.length;
+
       writeFallbackDb(db);
-      return res.status(200).json({ message: 'Document deleted successfully.' });
+      console.log(`[DELETE DOCUMENT] Fallback DB: Successfully deleted document ${docId} and ${deletedChunksCount} associated vector chunks.`);
+
+      return res.status(200).json({ message: 'Document and associated chunks deleted successfully.' });
     }
   } catch (error) {
     res.status(500).json({ error: 'Server error deleting document.', details: error.message });
