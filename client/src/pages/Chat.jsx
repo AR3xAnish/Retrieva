@@ -6,14 +6,21 @@ export default function Chat() {
   const { docId } = useParams();
   const navigate = useNavigate();
 
+  // Documents & Conversations lists
   const [documents, setDocuments] = useState([]);
+  const [conversations, setConversations] = useState([]);
+
+  // Active chat state
+  const [currentConversationId, setCurrentConversationId] = useState(null);
+  const [activeDocId, setActiveDocId] = useState(docId || null);
   const [messages, setMessages] = useState([]);
+
   const [inputValue, setInputValue] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
 
   const messagesEndRef = useRef(null);
 
-  // Load documents for sidebar listing
+  // Load documents
   const fetchDocs = async () => {
     try {
       const token = localStorage.getItem('token');
@@ -26,27 +33,81 @@ export default function Chat() {
     }
   };
 
-  useEffect(() => {
-    fetchDocs();
-  }, []);
+  // Load conversations
+  const fetchConversations = async () => {
+    try {
+      const token = localStorage.getItem('token');
+      const response = await axios.get('http://localhost:5000/api/conversations', {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setConversations(response.data);
+    } catch (err) {
+      console.error('Error loading conversations:', err);
+    }
+  };
 
-  // Auto-scroll to bottom of message viewport whenever message list updates
+  // Auto-scroll to bottom of messages view
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Initial and URL parameter load hooks
+  useEffect(() => {
+    fetchDocs();
+    fetchConversations();
+    handleNewChat();
+  }, [docId]);
+
+  const handleNewChat = () => {
+    setCurrentConversationId(null);
+    setActiveDocId(docId || null);
+    setMessages([]);
+  };
+
+  const handleSelectConversation = async (conv) => {
+    setCurrentConversationId(conv._id);
+    setActiveDocId(conv.documentId?._id || null);
+    try {
+      const token = localStorage.getItem('token');
+      const response = await axios.get(`http://localhost:5000/api/conversations/${conv._id}/messages`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setMessages(response.data);
+    } catch (err) {
+      console.error('Error loading messages:', err);
+    }
+  };
+
+  const handleDeleteConversation = async (id) => {
+    const confirmDelete = window.confirm("Delete this conversation and all its messages?");
+    if (!confirmDelete) return;
+
+    try {
+      const token = localStorage.getItem('token');
+      await axios.delete(`http://localhost:5000/api/conversations/${id}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setConversations(prev => prev.filter(c => c._id !== id));
+      if (currentConversationId === id) {
+        handleNewChat();
+      }
+    } catch (err) {
+      console.error('Error deleting conversation:', err);
+    }
+  };
 
   const handleSendMessage = async (e) => {
     e.preventDefault();
     const query = inputValue.trim();
     if (!query || isStreaming) return;
 
-    // Append user message
-    const userMsg = { role: 'user', text: query };
+    // Add user message to list
+    const userMsg = { role: 'user', content: query };
     setInputValue('');
     setIsStreaming(true);
 
-    // Initial empty assistant message block with blinking cursor enabled
-    const assistantMsg = { role: 'assistant', text: '', isStreaming: true, sources: [] };
+    // Prepare assistant message template
+    const assistantMsg = { role: 'assistant', content: '', isStreaming: true, sources: [] };
     setMessages(prev => [...prev, userMsg, assistantMsg]);
 
     try {
@@ -56,21 +117,34 @@ export default function Chat() {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${localStorage.getItem('token')}`
         },
-        body: JSON.stringify({ question: query, documentId: docId || undefined })
+        body: JSON.stringify({
+          question: query,
+          documentId: activeDocId || undefined,
+          conversationId: currentConversationId || undefined
+        })
       });
 
       if (!response.ok) {
         throw new Error('Failed to query RAG server: ' + response.status);
       }
 
-      // Check if response is standard JSON fallback instead of stream
+      // Check if server returned standard JSON response instead of stream
       const contentType = response.headers.get('Content-Type') || '';
       if (contentType.includes('application/json')) {
         const data = await response.json();
+        
+        // Save conversation ID to state
+        if (data.conversationId) {
+          setCurrentConversationId(data.conversationId);
+          if (data.isNew) {
+            fetchConversations();
+          }
+        }
+
         setMessages(prev => {
           const updated = [...prev];
           const lastMsg = updated[updated.length - 1];
-          lastMsg.text = data.answer || data.error || 'No relevant information found.';
+          lastMsg.content = data.answer || data.error || 'No relevant information found.';
           lastMsg.sources = data.sources || [];
           lastMsg.isStreaming = false;
           return updated;
@@ -104,12 +178,17 @@ export default function Chat() {
 
             try {
               const parsed = JSON.parse(dataStr);
-              if (parsed.type === 'text') {
+              if (parsed.type === 'meta') {
+                setCurrentConversationId(parsed.conversationId);
+                if (parsed.isNew) {
+                  fetchConversations();
+                }
+              } else if (parsed.type === 'text') {
                 streamedText += parsed.text;
                 setMessages(prev => {
                   const updated = [...prev];
                   const lastMsg = updated[updated.length - 1];
-                  lastMsg.text = streamedText;
+                  lastMsg.content = streamedText;
                   return updated;
                 });
               } else if (parsed.type === 'sources') {
@@ -127,7 +206,7 @@ export default function Chat() {
         }
       }
 
-      // Mark message streaming as completed (removes cursor)
+      // Mark message streaming as completed
       setMessages(prev => {
         const updated = [...prev];
         const lastMsg = updated[updated.length - 1];
@@ -140,7 +219,7 @@ export default function Chat() {
       setMessages(prev => {
         const updated = [...prev];
         const lastMsg = updated[updated.length - 1];
-        lastMsg.text = 'Something went wrong. Try again.';
+        lastMsg.content = 'Something went wrong. Try again.';
         lastMsg.isStreaming = false;
         return updated;
       });
@@ -149,9 +228,19 @@ export default function Chat() {
     }
   };
 
-  const selectedDocName = docId
-    ? (documents.find(d => d._id === docId)?.originalName || 'Loading document...')
-    : 'All documents';
+  const getHeaderTitle = () => {
+    if (currentConversationId) {
+      const activeConv = conversations.find(c => c._id === currentConversationId);
+      if (activeConv) {
+        return activeConv.documentId?.originalName || 'All documents';
+      }
+    }
+    if (docId && documents.length > 0) {
+      const doc = documents.find(d => d._id === docId);
+      return doc ? doc.originalName : 'All documents';
+    }
+    return 'All documents';
+  };
 
   return (
     <div className="w-screen h-screen flex flex-row bg-[#0b0b0b] text-white overflow-hidden font-sans selection:bg-[#378ADD]/30">
@@ -166,40 +255,56 @@ export default function Chat() {
           Documents
         </div>
 
-        {/* Section Label */}
+        {/* Section 1: New Chat Button */}
+        <button
+          onClick={handleNewChat}
+          className="w-full bg-transparent border border-[#2c2c2c] rounded-[6px] font-mono text-[12px] text-[#888780] hover:text-white hover:border-[#444441] transition-colors p-2 flex items-center justify-center gap-1.5 cursor-pointer mb-4"
+        >
+          <span className="ti ti-plus text-[14px]"></span>
+          New chat
+        </button>
+
+        {/* Section 2: Recent Conversations */}
         <div className="font-mono text-[10px] text-[#5F5E5A] tracking-widest uppercase mb-1.5 select-none">
-          your documents
+          recent conversations
         </div>
 
-        {/* Document Items List */}
+        {/* Conversation Items List */}
         <div className="flex flex-col gap-1">
-          {/* All documents option */}
-          <div
-            onClick={() => navigate('/chat')}
-            className={`font-mono text-[12px] cursor-pointer transition-colors select-none px-2 py-1.5 rounded-[6px] ${
-              !docId
-                ? 'bg-[#262626] border border-[#2c2c2c] text-white'
-                : 'text-[#888780] hover:text-white'
-            }`}
-          >
-            All documents
-          </div>
-
-          {/* Individual documents */}
-          {documents.map((doc) => (
-            <div
-              key={doc._id}
-              onClick={() => navigate(`/chat/${doc._id}`)}
-              className={`font-mono text-[12px] cursor-pointer transition-colors select-none px-2 py-1.5 rounded-[6px] truncate ${
-                docId === doc._id
-                  ? 'bg-[#262626] border border-[#2c2c2c] text-white'
-                  : 'text-[#888780] hover:text-white'
-              }`}
-              title={doc.originalName}
-            >
-              {doc.originalName}
-            </div>
-          ))}
+          {conversations.map((conv) => {
+            const isActive = conv._id === currentConversationId;
+            const linkedDocName = conv.documentId?.originalName || 'All documents';
+            return (
+              <div
+                key={conv._id}
+                onClick={() => handleSelectConversation(conv)}
+                className={`group relative flex items-center justify-between p-2 px-3 rounded-[6px] cursor-pointer transition-colors border ${
+                  isActive
+                    ? 'bg-[#262626] border-[#2c2c2c] text-white'
+                    : 'bg-transparent border-transparent text-[#888780] hover:text-white'
+                }`}
+              >
+                <div className="flex flex-col min-w-0 flex-1">
+                  <span className="font-mono text-[12px] truncate font-medium">
+                    {conv.title || 'Untitled Chat'}
+                  </span>
+                  <span className="font-mono text-[10px] text-[#5F5E5A] truncate">
+                    {linkedDocName}
+                  </span>
+                </div>
+                {/* Delete Button on Hover */}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDeleteConversation(conv._id);
+                  }}
+                  className="hidden group-hover:flex items-center justify-center bg-transparent border-none p-1 text-[#5F5E5A] hover:text-[#E24B4A] cursor-pointer transition-colors ml-2"
+                >
+                  <span className="ti ti-trash text-[14px]"></span>
+                </button>
+              </div>
+            );
+          })}
         </div>
       </aside>
 
@@ -208,7 +313,7 @@ export default function Chat() {
         {/* Top Bar */}
         <header className="h-11 bg-[#1a1a1a] border-b border-[#2c2c2c] px-6 flex items-center flex-shrink-0">
           <span className="font-mono text-[13px] text-white truncate">
-            {selectedDocName}
+            {getHeaderTitle()}
           </span>
         </header>
 
@@ -238,14 +343,14 @@ export default function Chat() {
                   }`}
                 >
                   <p className="whitespace-pre-wrap font-sans">
-                    {msg.text}
+                    {msg.content}
                     {msg.isStreaming && (
                       <span className="cursor-blink">▋</span>
                     )}
                   </p>
                 </div>
 
-                {/* Source citations (only on assistant messages once streaming ends) */}
+                {/* Source citations */}
                 {msg.role === 'assistant' && !msg.isStreaming && msg.sources && msg.sources.length > 0 && (
                   <div className="flex flex-wrap gap-1.5 mt-0.5">
                     {msg.sources.map((src, sIdx) => {

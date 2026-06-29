@@ -7,6 +7,8 @@ import { fileURLToPath } from 'url';
 
 import authMiddleware from '../middleware/auth.js';
 import { embedText } from '../lib/openai.js';
+import Conversation from '../models/Conversation.js';
+import Message from '../models/Message.js';
 
 const router = express.Router();
 
@@ -17,16 +19,23 @@ const FALLBACK_DB_PATH = path.join(__dirname, '../fallback_db.json');
 // Helper to read fallback json database
 const readFallbackDb = () => {
   if (!fs.existsSync(FALLBACK_DB_PATH)) {
-    return { users: [], documents: [], chunks: [] };
+    return { users: [], documents: [], chunks: [], conversations: [], messages: [] };
   }
   try {
     const data = fs.readFileSync(FALLBACK_DB_PATH, 'utf8');
     const parsed = JSON.parse(data);
     if (!parsed.chunks) parsed.chunks = [];
+    if (!parsed.conversations) parsed.conversations = [];
+    if (!parsed.messages) parsed.messages = [];
     return parsed;
   } catch (e) {
-    return { users: [], documents: [], chunks: [] };
+    return { users: [], documents: [], chunks: [], conversations: [], messages: [] };
   }
+};
+
+// Helper to write fallback json database
+const writeFallbackDb = (data) => {
+  fs.writeFileSync(FALLBACK_DB_PATH, JSON.stringify(data, null, 2), 'utf8');
 };
 
 // Helper for offline cosine similarity
@@ -56,17 +65,85 @@ const getGroqClient = () => {
 // POST /api/chat - RAG chat streaming route
 router.post('/', authMiddleware, async (req, res) => {
   try {
-    const { question, documentId } = req.body;
+    const { question, documentId, conversationId } = req.body;
 
     if (!question) {
       return res.status(400).json({ error: 'Question is required.' });
     }
 
-    // 1. Generate 384-dimension embedding for the question
+    const isDbConnected = mongoose.connection.readyState === 1;
+
+    let currentConversationId = conversationId;
+    let isNew = false;
+
+    // 1. Verify or create Conversation
+    if (isDbConnected) {
+      if (currentConversationId) {
+        const existingConv = await Conversation.findById(currentConversationId);
+        if (!existingConv) {
+          return res.status(404).json({ error: 'Conversation not found.' });
+        }
+        if (existingConv.userId.toString() !== req.userId) {
+          return res.status(403).json({ error: 'Access denied. You do not own this conversation.' });
+        }
+      } else {
+        const newConv = await Conversation.create({
+          userId: req.userId,
+          documentId: documentId || null,
+          title: question.slice(0, 60)
+        });
+        currentConversationId = newConv._id;
+        isNew = true;
+      }
+
+      // Save user message immediately
+      await Message.create({
+        conversationId: currentConversationId,
+        role: 'user',
+        content: question
+      });
+    } else {
+      console.log('MongoDB is offline. Saving conversation states to local JSON database.');
+      const db = readFallbackDb();
+      if (currentConversationId) {
+        const existingConv = db.conversations.find(c => c._id === currentConversationId);
+        if (!existingConv) {
+          return res.status(404).json({ error: 'Conversation not found.' });
+        }
+        if (existingConv.userId !== req.userId.toString()) {
+          return res.status(403).json({ error: 'Access denied. You do not own this conversation.' });
+        }
+      } else {
+        currentConversationId = 'mock_conv_' + Math.random().toString(36).substr(2, 9);
+        const newConv = {
+          _id: currentConversationId,
+          userId: req.userId.toString(),
+          documentId: documentId || null,
+          title: question.slice(0, 60),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+        db.conversations.push(newConv);
+        isNew = true;
+      }
+
+      // Save user message locally
+      const userMsg = {
+        _id: 'mock_msg_' + Math.random().toString(36).substr(2, 9),
+        conversationId: currentConversationId,
+        role: 'user',
+        content: question,
+        sources: [],
+        createdAt: new Date().toISOString()
+      };
+      db.messages.push(userMsg);
+      writeFallbackDb(db);
+    }
+
+    // 2. Generate 384-dimension embedding for the question
     const questionEmbedding = await embedText(question);
 
-    // 2. Search database for relevant chunks
-    const isDbConnected = mongoose.connection.readyState === 1;
+    // 3. Search database for relevant chunks
     let chunks = [];
 
     if (isDbConnected) {
@@ -121,15 +198,46 @@ router.post('/', authMiddleware, async (req, res) => {
       chunks = scored.sort((a, b) => b.score - a.score).slice(0, 5);
     }
 
-    // 3. Check if any chunks found
+    // 4. Check if any chunks found
     if (!chunks || chunks.length === 0) {
+      const fallbackAnswer = "I couldn't find relevant information in your documents.";
+      
+      // Save assistant fallback response
+      if (isDbConnected) {
+        await Message.create({
+          conversationId: currentConversationId,
+          role: 'assistant',
+          content: fallbackAnswer,
+          sources: []
+        });
+        await Conversation.findByIdAndUpdate(currentConversationId, { updatedAt: new Date() });
+      } else {
+        const db = readFallbackDb();
+        const fallbackMsg = {
+          _id: 'mock_msg_' + Math.random().toString(36).substr(2, 9),
+          conversationId: currentConversationId,
+          role: 'assistant',
+          content: fallbackAnswer,
+          sources: [],
+          createdAt: new Date().toISOString()
+        };
+        db.messages.push(fallbackMsg);
+        const convIdx = db.conversations.findIndex(c => c._id === currentConversationId);
+        if (convIdx !== -1) {
+          db.conversations[convIdx].updatedAt = new Date().toISOString();
+        }
+        writeFallbackDb(db);
+      }
+
       return res.status(200).json({
-        answer: "I couldn't find relevant information in your documents.",
-        sources: []
+        answer: fallbackAnswer,
+        sources: [],
+        conversationId: currentConversationId,
+        isNew
       });
     }
 
-    // 4. Build prompt string
+    // 5. Build prompt string
     const excerptBlocks = chunks.map((chunk, idx) => {
       return `[Source ${idx + 1} — ${chunk.filename}]\n${chunk.text}`;
     });
@@ -137,15 +245,31 @@ router.post('/', authMiddleware, async (req, res) => {
 
     const systemInstruction = "You are a helpful assistant. Answer the user's question based strictly on the provided document excerpts. If the answer is not in the excerpts, say so clearly. Always cite which source you used, e.g. According to [Source 1 — filename]...";
 
-    // 5. Initialize SSE streaming headers
+    // 6. Initialize SSE streaming headers
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
     res.flushHeaders();
 
+    // First SSE Event: Send Metadata
+    res.write(`data: ${JSON.stringify({ type: 'meta', conversationId: currentConversationId, isNew })}\n\n`);
+
+    // Prepare unique sources for message logging
+    const uniqueSources = [];
+    const seenFiles = new Set();
+    for (const c of chunks) {
+      if (!seenFiles.has(c.filename)) {
+        seenFiles.add(c.filename);
+        uniqueSources.push({
+          filename: c.filename,
+          score: c.score || 1.0
+        });
+      }
+    }
+
     const groq = getGroqClient();
 
-    const sendSimulatedStream = () => {
+    const sendSimulatedStream = async () => {
       const mockResponse = `According to [Source 1 — ${chunks[0].filename}], here is the context retrieved from your files: "${chunks[0].text.substring(0, 150)}...". Let me know if you need more details!`;
       const words = mockResponse.split(' ');
       let wordIdx = 0;
@@ -157,12 +281,26 @@ router.post('/', authMiddleware, async (req, res) => {
           wordIdx++;
           setTimeout(sendMockWord, 40);
         } else {
-          const sourcesList = chunks.map(c => ({
-            filename: c.filename,
-            chunkIndex: c.chunkIndex,
-            score: c.score || 1.0
-          }));
-          res.write(`data: ${JSON.stringify({ type: 'sources', sources: sourcesList })}\n\n`);
+          // Log completion in local fallback DB
+          if (!isDbConnected) {
+            const db = readFallbackDb();
+            const assistantMsg = {
+              _id: 'mock_msg_' + Math.random().toString(36).substr(2, 9),
+              conversationId: currentConversationId,
+              role: 'assistant',
+              content: mockResponse,
+              sources: uniqueSources,
+              createdAt: new Date().toISOString()
+            };
+            db.messages.push(assistantMsg);
+            const convIdx = db.conversations.findIndex(c => c._id === currentConversationId);
+            if (convIdx !== -1) {
+              db.conversations[convIdx].updatedAt = new Date().toISOString();
+            }
+            writeFallbackDb(db);
+          }
+
+          res.write(`data: ${JSON.stringify({ type: 'sources', sources: uniqueSources })}\n\n`);
           res.write('data: [DONE]\n\n');
           res.end();
         }
@@ -184,29 +322,36 @@ router.post('/', authMiddleware, async (req, res) => {
           stream: true
         });
 
+        let fullResponse = '';
         for await (const chunkEvent of chatStream) {
           const content = chunkEvent.choices[0]?.delta?.content || '';
           if (content) {
+            fullResponse += content;
             res.write(`data: ${JSON.stringify({ type: 'text', text: content })}\n\n`);
           }
         }
 
-        const sourcesList = chunks.map(c => ({
-          filename: c.filename,
-          chunkIndex: c.chunkIndex,
-          score: c.score || 1.0
-        }));
+        // Log assistant message & update conversation in MongoDB
+        if (isDbConnected) {
+          await Message.create({
+            conversationId: currentConversationId,
+            role: 'assistant',
+            content: fullResponse,
+            sources: uniqueSources
+          });
+          await Conversation.findByIdAndUpdate(currentConversationId, { updatedAt: new Date() });
+        }
 
-        res.write(`data: ${JSON.stringify({ type: 'sources', sources: sourcesList })}\n\n`);
+        res.write(`data: ${JSON.stringify({ type: 'sources', sources: uniqueSources })}\n\n`);
         res.write('data: [DONE]\n\n');
         res.end();
       } catch (streamErr) {
         console.warn('[GROQ CHAT] Network error calling Groq API, falling back to simulated SSE stream:', streamErr.message);
-        sendSimulatedStream();
+        await sendSimulatedStream();
       }
     } else {
       console.warn('[GROQ CHAT] Warning: GROQ_API_KEY is not set or holds a placeholder. Simulating SSE stream for development.');
-      sendSimulatedStream();
+      await sendSimulatedStream();
     }
 
   } catch (error) {

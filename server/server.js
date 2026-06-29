@@ -6,6 +6,7 @@ import authRouter from './routes/auth.js';
 import authMiddleware from './middleware/auth.js';
 import documentsRouter from './routes/documents.js';
 import chatRouter from './routes/chat.js';
+import conversationRouter from './routes/conversations.js';
 import { connectDb } from './lib/db.js';
 
 // Load environment variables
@@ -23,6 +24,7 @@ app.use(express.json());
 app.use('/api/auth', authRouter);
 app.use('/api', documentsRouter);
 app.use('/api/chat', chatRouter);
+app.use('/api/conversations', conversationRouter);
 
 // Protected profile verification endpoint
 app.get('/api/auth/profile', authMiddleware, (req, res) => {
