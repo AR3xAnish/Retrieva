@@ -14,7 +14,7 @@ import { embedText } from '../lib/openai.js';
 import authMiddleware from '../middleware/auth.js';
 
 const require = createRequire(import.meta.url);
-const pdfParse = require('pdf-parse');
+const { PDFParse } = require('pdf-parse');
 
 const router = express.Router();
 
@@ -61,8 +61,10 @@ const extractText = async (buffer, mimetype) => {
   if (mimetype === 'text/plain') {
     return buffer.toString('utf8');
   } else if (mimetype === 'application/pdf') {
-    const data = await pdfParse(buffer);
-    return data.text;
+    const parser = new PDFParse({ data: buffer });
+    const result = await parser.getText();
+    await parser.destroy();
+    return result.text;
   } else if (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
     const result = await mammoth.extractRawText({ buffer });
     return result.value;

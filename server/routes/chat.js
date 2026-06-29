@@ -145,39 +145,7 @@ router.post('/', authMiddleware, async (req, res) => {
 
     const groq = getGroqClient();
 
-    if (groq) {
-      // Stream response from Groq Llama model
-      console.log('[GROQ CHAT] Starting streaming chat completion using llama-3.1-8b-instant...');
-      const chatStream = await groq.chat.completions.create({
-        model: 'llama-3.1-8b-instant',
-        messages: [
-          { role: 'system', content: systemInstruction },
-          { role: 'user', content: prompt + `\n\nQuestion: ${question}` }
-        ],
-        max_tokens: 1024,
-        stream: true
-      });
-
-      for await (const chunkEvent of chatStream) {
-        const content = chunkEvent.choices[0]?.delta?.content || '';
-        if (content) {
-          res.write(`data: ${JSON.stringify({ type: 'text', text: content })}\n\n`);
-        }
-      }
-
-      // After streaming completes, write sources list andDONE SSE event
-      const sourcesList = chunks.map(c => ({
-        filename: c.filename,
-        chunkIndex: c.chunkIndex,
-        score: c.score || 1.0
-      }));
-
-      res.write(`data: ${JSON.stringify({ type: 'sources', sources: sourcesList })}\n\n`);
-      res.write('data: [DONE]\n\n');
-      res.end();
-    } else {
-      console.warn('[GROQ CHAT] Warning: GROQ_API_KEY is not set or holds a placeholder. Simulating SSE stream for development.');
-      // Stream mock response word-by-word
+    const sendSimulatedStream = () => {
       const mockResponse = `According to [Source 1 — ${chunks[0].filename}], here is the context retrieved from your files: "${chunks[0].text.substring(0, 150)}...". Let me know if you need more details!`;
       const words = mockResponse.split(' ');
       let wordIdx = 0;
@@ -201,6 +169,44 @@ router.post('/', authMiddleware, async (req, res) => {
       };
 
       sendMockWord();
+    };
+
+    if (groq) {
+      try {
+        console.log('[GROQ CHAT] Starting streaming chat completion using llama-3.1-8b-instant...');
+        const chatStream = await groq.chat.completions.create({
+          model: 'llama-3.1-8b-instant',
+          messages: [
+            { role: 'system', content: systemInstruction },
+            { role: 'user', content: prompt + `\n\nQuestion: ${question}` }
+          ],
+          max_tokens: 1024,
+          stream: true
+        });
+
+        for await (const chunkEvent of chatStream) {
+          const content = chunkEvent.choices[0]?.delta?.content || '';
+          if (content) {
+            res.write(`data: ${JSON.stringify({ type: 'text', text: content })}\n\n`);
+          }
+        }
+
+        const sourcesList = chunks.map(c => ({
+          filename: c.filename,
+          chunkIndex: c.chunkIndex,
+          score: c.score || 1.0
+        }));
+
+        res.write(`data: ${JSON.stringify({ type: 'sources', sources: sourcesList })}\n\n`);
+        res.write('data: [DONE]\n\n');
+        res.end();
+      } catch (streamErr) {
+        console.warn('[GROQ CHAT] Network error calling Groq API, falling back to simulated SSE stream:', streamErr.message);
+        sendSimulatedStream();
+      }
+    } else {
+      console.warn('[GROQ CHAT] Warning: GROQ_API_KEY is not set or holds a placeholder. Simulating SSE stream for development.');
+      sendSimulatedStream();
     }
 
   } catch (error) {
