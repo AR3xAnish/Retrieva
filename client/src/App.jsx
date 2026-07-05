@@ -12,7 +12,7 @@ import Settings from './pages/Settings';
 import Layout from './components/Layout';
 
 // API configuration
-const API_URL = 'http://localhost:5000/api';
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
 // Routes sub-rendering shell inside AuthProvider context
 function AppRoutes() {

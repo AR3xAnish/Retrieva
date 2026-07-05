@@ -2,6 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
 
+const api = axios.create({
+  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
+});
+
 // Helper to determine icon classes based on file mimetype
 const getFileIconClass = (mimetype) => {
   if (mimetype === 'application/pdf') return 'ti ti-file-type-pdf';
@@ -38,7 +42,7 @@ export default function Dashboard() {
   const fetchDocs = async () => {
     try {
       const token = localStorage.getItem('token');
-      const response = await axios.get('http://localhost:5000/api/docs', {
+      const response = await api.get('/docs', {
         headers: { Authorization: `Bearer ${token}` }
       });
       setDocuments(response.data);
@@ -85,7 +89,7 @@ export default function Dashboard() {
 
     try {
       const token = localStorage.getItem('token');
-      await axios.post('http://localhost:5000/api/ingest', formData, {
+      await api.post('/ingest', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
           'Authorization': `Bearer ${token}`
@@ -116,7 +120,7 @@ export default function Dashboard() {
 
     try {
       const token = localStorage.getItem('token');
-      await axios.delete(`http://localhost:5000/api/docs/${id}`, {
+      await api.delete(`/docs/${id}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       await fetchDocs();

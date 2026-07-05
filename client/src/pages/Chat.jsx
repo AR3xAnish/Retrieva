@@ -2,6 +2,10 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 
+const api = axios.create({
+  baseURL: import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
+});
+
 export default function Chat() {
   const { docId } = useParams();
   const navigate = useNavigate();
@@ -24,7 +28,7 @@ export default function Chat() {
   const fetchDocs = async () => {
     try {
       const token = localStorage.getItem('token');
-      const response = await axios.get('http://localhost:5000/api/docs', {
+      const response = await api.get('/docs', {
         headers: { Authorization: `Bearer ${token}` }
       });
       setDocuments(response.data);
@@ -37,7 +41,7 @@ export default function Chat() {
   const fetchConversations = async () => {
     try {
       const token = localStorage.getItem('token');
-      const response = await axios.get('http://localhost:5000/api/conversations', {
+      const response = await api.get('/conversations', {
         headers: { Authorization: `Bearer ${token}` }
       });
       setConversations(response.data);
@@ -69,7 +73,7 @@ export default function Chat() {
     setActiveDocId(conv.documentId?._id || null);
     try {
       const token = localStorage.getItem('token');
-      const response = await axios.get(`http://localhost:5000/api/conversations/${conv._id}/messages`, {
+      const response = await api.get(`/conversations/${conv._id}/messages`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       setMessages(response.data);
@@ -84,7 +88,7 @@ export default function Chat() {
 
     try {
       const token = localStorage.getItem('token');
-      await axios.delete(`http://localhost:5000/api/conversations/${id}`, {
+      await api.delete(`/conversations/${id}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       setConversations(prev => prev.filter(c => c._id !== id));
@@ -111,7 +115,7 @@ export default function Chat() {
     setMessages(prev => [...prev, userMsg, assistantMsg]);
 
     try {
-      const response = await fetch('http://localhost:5000/api/chat', {
+      const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:5000/api'}/chat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
