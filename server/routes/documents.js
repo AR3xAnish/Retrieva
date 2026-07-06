@@ -5,7 +5,7 @@ import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
+import PDFParser from 'pdf2json';
 
 import Document from '../models/Document.js';
 import Chunk from '../models/Chunk.js';
@@ -55,19 +55,20 @@ const ALLOWED_MIMETYPES = [
 
 // Helper to parse file buffers
 async function extractPDFText(buffer) {
-  const uint8Array = new Uint8Array(buffer);
-  const loadingTask = pdfjsLib.getDocument({ data: uint8Array });
-  const pdf = await loadingTask.promise;
-  
-  let fullText = '';
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i);
-    const textContent = await page.getTextContent();
-    const pageText = textContent.items.map(item => item.str).join(' ');
-    fullText += pageText + '\n';
-  }
-  
-  return fullText;
+  return new Promise((resolve, reject) => {
+    const pdfParser = new PDFParser(null, 1);
+    
+    pdfParser.on('pdfParser_dataReady', (pdfData) => {
+      const text = pdfParser.getRawTextContent();
+      resolve(text);
+    });
+    
+    pdfParser.on('pdfParser_dataError', (error) => {
+      reject(new Error(error.parserError));
+    });
+    
+    pdfParser.parseBuffer(buffer);
+  });
 }
 
 const extractText = async (buffer, mimetype) => {
