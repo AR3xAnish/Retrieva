@@ -18,7 +18,7 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/retrie
 
 // Middleware
 app.use(cors({
-  origin: function(origin, callback) {
+  origin: function (origin, callback) {
     const allowed = [
       'http://localhost:5173',
       process.env.CLIENT_URL
@@ -31,6 +31,7 @@ app.use(cors({
   },
   credentials: true
 }));
+app.options('*', cors(corsOptions));
 app.use(express.json());
 
 // Routes
