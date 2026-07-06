@@ -5,16 +5,13 @@ import mongoose from 'mongoose';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createRequire } from 'module';
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 import Document from '../models/Document.js';
 import Chunk from '../models/Chunk.js';
 import { chunkText } from '../lib/chunker.js';
 import { embedText } from '../lib/openai.js';
 import authMiddleware from '../middleware/auth.js';
-
-const require = createRequire(import.meta.url);
-const { PDFParse } = require('pdf-parse');
 
 const router = express.Router();
 
@@ -57,14 +54,27 @@ const ALLOWED_MIMETYPES = [
 ];
 
 // Helper to parse file buffers
+async function extractPDFText(buffer) {
+  const uint8Array = new Uint8Array(buffer);
+  const loadingTask = pdfjsLib.getDocument({ data: uint8Array });
+  const pdf = await loadingTask.promise;
+  
+  let fullText = '';
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const textContent = await page.getTextContent();
+    const pageText = textContent.items.map(item => item.str).join(' ');
+    fullText += pageText + '\n';
+  }
+  
+  return fullText;
+}
+
 const extractText = async (buffer, mimetype) => {
   if (mimetype === 'text/plain') {
     return buffer.toString('utf8');
   } else if (mimetype === 'application/pdf') {
-    const parser = new PDFParse({ data: buffer });
-    const result = await parser.getText();
-    await parser.destroy();
-    return result.text;
+    return await extractPDFText(buffer);
   } else if (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
     const result = await mammoth.extractRawText({ buffer });
     return result.value;

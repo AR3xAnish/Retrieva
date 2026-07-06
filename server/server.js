@@ -16,8 +16,7 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/retrieva';
 
-// Middleware
-app.use(cors({
+const corsOptions = {
   origin: function (origin, callback) {
     const allowed = [
       'http://localhost:5173',
@@ -30,7 +29,9 @@ app.use(cors({
     }
   },
   credentials: true
-}));
+};
+
+app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json());
 
