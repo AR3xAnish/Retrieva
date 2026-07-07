@@ -1,9 +1,6 @@
 import express from 'express';
 import mongoose from 'mongoose';
 import { Groq } from 'groq-sdk';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 
 import authMiddleware from '../middleware/auth.js';
 import { embedText } from '../lib/openai.js';
@@ -11,46 +8,6 @@ import Conversation from '../models/Conversation.js';
 import Message from '../models/Message.js';
 
 const router = express.Router();
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const FALLBACK_DB_PATH = path.join(__dirname, '../fallback_db.json');
-
-// Helper to read fallback json database
-const readFallbackDb = () => {
-  if (!fs.existsSync(FALLBACK_DB_PATH)) {
-    return { users: [], documents: [], chunks: [], conversations: [], messages: [] };
-  }
-  try {
-    const data = fs.readFileSync(FALLBACK_DB_PATH, 'utf8');
-    const parsed = JSON.parse(data);
-    if (!parsed.chunks) parsed.chunks = [];
-    if (!parsed.conversations) parsed.conversations = [];
-    if (!parsed.messages) parsed.messages = [];
-    return parsed;
-  } catch (e) {
-    return { users: [], documents: [], chunks: [], conversations: [], messages: [] };
-  }
-};
-
-// Helper to write fallback json database
-const writeFallbackDb = (data) => {
-  fs.writeFileSync(FALLBACK_DB_PATH, JSON.stringify(data, null, 2), 'utf8');
-};
-
-// Helper for offline cosine similarity
-const cosineSimilarity = (vecA, vecB) => {
-  let dotProduct = 0.0;
-  let normA = 0.0;
-  let normB = 0.0;
-  for (let k = 0; k < vecA.length; k++) {
-    dotProduct += vecA[k] * vecB[k];
-    normA += vecA[k] * vecA[k];
-    normB += vecB[k] * vecB[k];
-  }
-  if (normA === 0 || normB === 0) return 0;
-  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-};
 
 const getGroqClient = () => {
   const apiKey = (process.env.GROQ_API_KEY || '').trim();
@@ -71,163 +28,79 @@ router.post('/', authMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'Question is required.' });
     }
 
-    const isDbConnected = mongoose.connection.readyState === 1;
-
     let currentConversationId = conversationId;
     let isNew = false;
 
     // 1. Verify or create Conversation
-    if (isDbConnected) {
-      if (currentConversationId) {
-        const existingConv = await Conversation.findById(currentConversationId);
-        if (!existingConv) {
-          return res.status(404).json({ error: 'Conversation not found.' });
-        }
-        if (existingConv.userId.toString() !== req.userId) {
-          return res.status(403).json({ error: 'Access denied. You do not own this conversation.' });
-        }
-      } else {
-        const newConv = await Conversation.create({
-          userId: req.userId,
-          documentId: documentId || null,
-          title: question.slice(0, 60)
-        });
-        currentConversationId = newConv._id;
-        isNew = true;
+    if (currentConversationId) {
+      const existingConv = await Conversation.findById(currentConversationId);
+      if (!existingConv) {
+        return res.status(404).json({ error: 'Conversation not found.' });
       }
-
-      // Save user message immediately
-      await Message.create({
-        conversationId: currentConversationId,
-        role: 'user',
-        content: question
-      });
+      if (existingConv.userId.toString() !== req.userId) {
+        return res.status(403).json({ error: 'Access denied. You do not own this conversation.' });
+      }
     } else {
-      console.log('MongoDB is offline. Saving conversation states to local JSON database.');
-      const db = readFallbackDb();
-      if (currentConversationId) {
-        const existingConv = db.conversations.find(c => c._id === currentConversationId);
-        if (!existingConv) {
-          return res.status(404).json({ error: 'Conversation not found.' });
-        }
-        if (existingConv.userId !== req.userId.toString()) {
-          return res.status(403).json({ error: 'Access denied. You do not own this conversation.' });
-        }
-      } else {
-        currentConversationId = 'mock_conv_' + Math.random().toString(36).substr(2, 9);
-        const newConv = {
-          _id: currentConversationId,
-          userId: req.userId.toString(),
-          documentId: documentId || null,
-          title: question.slice(0, 60),
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
-        };
-        db.conversations.push(newConv);
-        isNew = true;
-      }
-
-      // Save user message locally
-      const userMsg = {
-        _id: 'mock_msg_' + Math.random().toString(36).substr(2, 9),
-        conversationId: currentConversationId,
-        role: 'user',
-        content: question,
-        sources: [],
-        createdAt: new Date().toISOString()
-      };
-      db.messages.push(userMsg);
-      writeFallbackDb(db);
+      const newConv = await Conversation.create({
+        userId: req.userId,
+        documentId: documentId || null,
+        title: question.slice(0, 60)
+      });
+      currentConversationId = newConv._id;
+      isNew = true;
     }
+
+    // Save user message immediately
+    await Message.create({
+      conversationId: currentConversationId,
+      role: 'user',
+      content: question
+    });
 
     // 2. Generate 384-dimension embedding for the question
     const questionEmbedding = await embedText(question);
 
     // 3. Search database for relevant chunks
-    let chunks = [];
-
-    if (isDbConnected) {
-      // Configure filter criteria
-      const filter = { userId: req.userId.toString() };
-      if (documentId) {
-        filter.documentId = new mongoose.Types.ObjectId(documentId);
-      }
-
-      const pipeline = [
-        {
-          $vectorSearch: {
-            index: 'vector_index',
-            path: 'embedding',
-            queryVector: questionEmbedding,
-            numCandidates: 100,
-            limit: 5,
-            filter: filter
-          }
-        },
-        {
-          $project: {
-            text: 1,
-            filename: 1,
-            chunkIndex: 1,
-            score: { $meta: 'vectorSearchScore' }
-          }
-        }
-      ];
-
-      chunks = await mongoose.connection.db.collection('chunks').aggregate(pipeline).toArray();
-    } else {
-      console.log('MongoDB is offline. Doing offline cosine similarity match on local JSON fallback database.');
-      const db = readFallbackDb();
-      const userChunks = db.chunks.filter(c => {
-        const matchUser = c.userId === req.userId.toString();
-        const matchDoc = documentId ? c.documentId === documentId : true;
-        return matchUser && matchDoc;
-      });
-
-      const scored = userChunks.map(c => {
-        const score = cosineSimilarity(questionEmbedding, c.embedding);
-        return {
-          text: c.text,
-          filename: c.filename,
-          chunkIndex: c.chunkIndex,
-          score
-        };
-      });
-
-      // Sort by score descending and take top 5
-      chunks = scored.sort((a, b) => b.score - a.score).slice(0, 5);
+    const filter = { userId: req.userId.toString() };
+    if (documentId) {
+      filter.documentId = new mongoose.Types.ObjectId(documentId);
     }
+
+    const pipeline = [
+      {
+        $vectorSearch: {
+          index: 'vector_index',
+          path: 'embedding',
+          queryVector: questionEmbedding,
+          numCandidates: 100,
+          limit: 5,
+          filter: filter
+        }
+      },
+      {
+        $project: {
+          text: 1,
+          filename: 1,
+          chunkIndex: 1,
+          score: { $meta: 'vectorSearchScore' }
+        }
+      }
+    ];
+
+    const chunks = await mongoose.connection.db.collection('chunks').aggregate(pipeline).toArray();
 
     // 4. Check if any chunks found
     if (!chunks || chunks.length === 0) {
       const fallbackAnswer = "I couldn't find relevant information in your documents.";
       
       // Save assistant fallback response
-      if (isDbConnected) {
-        await Message.create({
-          conversationId: currentConversationId,
-          role: 'assistant',
-          content: fallbackAnswer,
-          sources: []
-        });
-        await Conversation.findByIdAndUpdate(currentConversationId, { updatedAt: new Date() });
-      } else {
-        const db = readFallbackDb();
-        const fallbackMsg = {
-          _id: 'mock_msg_' + Math.random().toString(36).substr(2, 9),
-          conversationId: currentConversationId,
-          role: 'assistant',
-          content: fallbackAnswer,
-          sources: [],
-          createdAt: new Date().toISOString()
-        };
-        db.messages.push(fallbackMsg);
-        const convIdx = db.conversations.findIndex(c => c._id === currentConversationId);
-        if (convIdx !== -1) {
-          db.conversations[convIdx].updatedAt = new Date().toISOString();
-        }
-        writeFallbackDb(db);
-      }
+      await Message.create({
+        conversationId: currentConversationId,
+        role: 'assistant',
+        content: fallbackAnswer,
+        sources: []
+      });
+      await Conversation.findByIdAndUpdate(currentConversationId, { updatedAt: new Date() });
 
       return res.status(200).json({
         answer: fallbackAnswer,
@@ -274,31 +147,21 @@ router.post('/', authMiddleware, async (req, res) => {
       const words = mockResponse.split(' ');
       let wordIdx = 0;
 
-      const sendMockWord = () => {
+      const sendMockWord = async () => {
         if (wordIdx < words.length) {
           const word = (wordIdx === 0 ? '' : ' ') + words[wordIdx];
           res.write(`data: ${JSON.stringify({ type: 'text', text: word })}\n\n`);
           wordIdx++;
           setTimeout(sendMockWord, 40);
         } else {
-          // Log completion in local fallback DB
-          if (!isDbConnected) {
-            const db = readFallbackDb();
-            const assistantMsg = {
-              _id: 'mock_msg_' + Math.random().toString(36).substr(2, 9),
-              conversationId: currentConversationId,
-              role: 'assistant',
-              content: mockResponse,
-              sources: uniqueSources,
-              createdAt: new Date().toISOString()
-            };
-            db.messages.push(assistantMsg);
-            const convIdx = db.conversations.findIndex(c => c._id === currentConversationId);
-            if (convIdx !== -1) {
-              db.conversations[convIdx].updatedAt = new Date().toISOString();
-            }
-            writeFallbackDb(db);
-          }
+          // Log completion in MongoDB
+          await Message.create({
+            conversationId: currentConversationId,
+            role: 'assistant',
+            content: mockResponse,
+            sources: uniqueSources
+          });
+          await Conversation.findByIdAndUpdate(currentConversationId, { updatedAt: new Date() });
 
           res.write(`data: ${JSON.stringify({ type: 'sources', sources: uniqueSources })}\n\n`);
           res.write('data: [DONE]\n\n');
@@ -332,15 +195,13 @@ router.post('/', authMiddleware, async (req, res) => {
         }
 
         // Log assistant message & update conversation in MongoDB
-        if (isDbConnected) {
-          await Message.create({
-            conversationId: currentConversationId,
-            role: 'assistant',
-            content: fullResponse,
-            sources: uniqueSources
-          });
-          await Conversation.findByIdAndUpdate(currentConversationId, { updatedAt: new Date() });
-        }
+        await Message.create({
+          conversationId: currentConversationId,
+          role: 'assistant',
+          content: fullResponse,
+          sources: uniqueSources
+        });
+        await Conversation.findByIdAndUpdate(currentConversationId, { updatedAt: new Date() });
 
         res.write(`data: ${JSON.stringify({ type: 'sources', sources: uniqueSources })}\n\n`);
         res.write('data: [DONE]\n\n');
