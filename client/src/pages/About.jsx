@@ -1,7 +1,7 @@
 import React from 'react';
 import { useAuth } from '../hooks/useAuth';
 
-export default function Settings() {
+export default function About() {
   const { user } = useAuth();
 
   return (
@@ -9,7 +9,7 @@ export default function Settings() {
       {/* Title */}
       <div className="border-b border-[#2c2c2c] pb-3">
         <span className="font-mono text-[15px] font-medium text-white tracking-wider uppercase">
-          Settings
+          About
         </span>
       </div>
 

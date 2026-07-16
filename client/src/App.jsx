@@ -8,7 +8,7 @@ import Register from './pages/Register';
 import Home from './pages/Home';
 import Dashboard from './pages/Dashboard';
 import Chat from './pages/Chat';
-import Settings from './pages/Settings';
+import About from './pages/About';
 import Layout from './components/Layout';
 
 // API configuration
@@ -37,13 +37,13 @@ function AppRoutes() {
         }
       />
 
-      {/* Protected Settings View */}
+      {/* Protected About View */}
       <Route
-        path="/settings"
+        path="/about"
         element={
           <PrivateRoute>
             <Layout>
-              <Settings />
+              <About />
             </Layout>
           </PrivateRoute>
         }

@@ -39,7 +39,7 @@ export default function Layout({ children }) {
             Documents
           </NavLink>
           <NavLink
-            to="/settings"
+            to="/about"
             className={({ isActive }) =>
               `font-mono text-[12px] px-2.5 py-1 transition-colors select-none ${
                 isActive
@@ -48,7 +48,7 @@ export default function Layout({ children }) {
               }`
             }
           >
-            Settings
+            About
           </NavLink>
         </div>
 
